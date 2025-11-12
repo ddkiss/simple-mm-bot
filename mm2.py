@@ -507,13 +507,14 @@ def adjust_orders():
     """
     
     # --- 1. 获取价格 (同 V2) ---
+    global current_price # 允许在 WS 未连接时使用 REST 价格
     if current_price == 0:
         logger.info("等待 WS 价格... 尝试 REST API 回退")
         price_from_rest = get_ticker(SYMBOL)
         if price_from_rest == 0:
             logger.warning("无法获取价格，跳过调整")
             return
-        global current_price # 允许在 WS 未连接时使用 REST 价格
+        
         current_price = price_from_rest
     
     # --- 2. 检查 API 失败：余额和保证金 ---
