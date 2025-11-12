@@ -18,6 +18,7 @@ Backpack Exchange 自动合约做市策略实现 (V3 - 精度查询 & 精细化�
         - 只取消与目标不符的订单 (价格、方向错误), 保留正确的订单
         - 移除 cancel_all_orders() 的常规调用
 - [更新] WS订阅统一使用新格式: 只订阅新格式公共/私有流, 调整签名和stream名称为 account.orderUpdate, 移除旧V1处理
+- [更新] 调整 WS 消息处理以匹配文档: 使用 'c' 而非 'lastPrice' 获取价格; 添加事件类型检查; 订阅 account.orderUpdate.<symbol> 以过滤特定符号
 """
 
 import os
@@ -487,32 +488,34 @@ def on_ws_message(ws, message):
             payload = data.get('data', data)
 
             if stream == f"ticker.{SYMBOL}":
-                new_price = float(payload.get('lastPrice', 0))
+                new_price = float(payload.get('c', 0))
             
-            elif stream == "account.orderUpdate":
-                 last_qty = float(payload.get('l', 0))
-                 if last_qty > 0:
-                     logger.info("填充事件触发调整")
-                     adjustment_needed.set() # 仅设置事件
-                     qty = last_qty
-                     price = float(payload.get('L', 0))
-                     side = payload.get('S')
-                     volume = qty * price
-                     total_volume += volume
-                     
-                     if side == 'Bid':
-                         long_success += 1
-                     elif side == 'Ask':
-                         short_success += 1
-                     
-                     is_maker = payload.get('m', False)
-                     if is_maker:
-                         maker_fills += 1
-                         logger.info(f"订单填充 (Maker): {side} {qty} @ {price}, 交易量: {volume} USDC")
-                     else:
-                         taker_fills += 1
-                         logger.info(f"订单填充 (Taker): {side} {qty} @ {price}, 交易量: {volume} USDC")
-                 return # 处理完毕
+            elif stream == f"account.orderUpdate.{SYMBOL}":
+                event_type = payload.get('e')
+                if event_type == "orderFill":
+                    last_qty = float(payload.get('l', 0))
+                    if last_qty > 0:
+                        logger.info("填充事件触发调整")
+                        adjustment_needed.set() # 仅设置事件
+                        qty = last_qty
+                        price = float(payload.get('L', 0))
+                        side = payload.get('S')
+                        volume = qty * price
+                        total_volume += volume
+                        
+                        if side == 'Bid':
+                            long_success += 1
+                        elif side == 'Ask':
+                            short_success += 1
+                        
+                        is_maker = payload.get('m', False)
+                        if is_maker:
+                            maker_fills += 1
+                            logger.info(f"订单填充 (Maker): {side} {qty} @ {price}, 交易量: {volume} USDC")
+                        else:
+                            taker_fills += 1
+                            logger.info(f"订单填充 (Taker): {side} {qty} @ {price}, 交易量: {volume} USDC")
+                return # 处理完毕
             
             else: # 其他事件
                  return
@@ -553,7 +556,7 @@ def on_ws_open(ws):
         logger.error("私钥未加载, 无法订阅私有流。")
         return
 
-    # 新格式私有订阅 (account.orderUpdate, 不 per symbol)
+    # 新格式私有订阅 (account.orderUpdate.<symbol>, 不 per symbol)
     timestamp = int(time.time() * 1000)
     window = "5000"
     sign_str = f"instruction=subscribe&timestamp={timestamp}&window={window}"  # 无 streams
@@ -561,11 +564,11 @@ def on_ws_open(ws):
     encoded_signature = base64.b64encode(signature_bytes).decode('utf-8')
     private_sub = {
         "method": "SUBSCRIBE",
-        "params": ["account.orderUpdate"],
+        "params": [f"account.orderUpdate.{SYMBOL}"],
         "signature": [PUBLIC_KEY, encoded_signature, str(timestamp), window]
     }
     ws.send(json.dumps(private_sub))
-    logger.info(f"订阅私有流: account.orderUpdate")
+    logger.info(f"订阅私有流: account.orderUpdate.{SYMBOL}")
 
 
     def ping_loop():
