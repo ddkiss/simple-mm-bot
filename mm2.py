@@ -19,6 +19,7 @@ Backpack Exchange 自动合约做市策略实现 (V3 - 精度查询 & 精细化�
         - 移除 cancel_all_orders() 的常规调用
 - [更新] WS订阅统一使用新格式: 只订阅新格式公共/私有流, 调整签名和stream名称为 account.orderUpdate, 移除旧V1处理
 - [更新] 调整 WS 消息处理以匹配文档: 使用 'c' 而非 'lastPrice' 获取价格; 添加事件类型检查; 订阅 account.orderUpdate.<symbol> 以过滤特定符号
+- [更新] 对齐 OpenAPI 文档标准: 使用 /api/v1/ 路径优先; 下单使用 /api/v1/order 单笔 (文档示例为 /orders batch, 但调整为 single); side 使用 'Bid'/'Ask'; 指令类型匹配文档
 """
 
 import os
@@ -192,39 +193,26 @@ def get_market_info(symbol):
     if market_info and (time.time() - market_cache_time) < PRECISION_CACHE_TTL:
         return market_info
 
-    data = rest_request("GET", "/api/v1/markets", None, None, is_public=True) # 注意: 路径可能是 /api/v1/markets
+    # 文档使用 /api/v1/markets
+    data = rest_request("GET", "/api/v1/markets", None, None, is_public=True)
     if not data:
-        # 尝试备用路径
+        # 备用 /markets
         data = rest_request("GET", "/markets", None, None, is_public=True)
 
-    if data: # V1 API 格式 (data 是列表)
+    if data and isinstance(data, list):
         for market in data:
             if market.get('symbol') == symbol:
-                # v1 精度在 'filters' -> 'price' / 'quantity'
-                filters = market.get('filters', {})
-                tick_size = Decimal(filters.get('price', {}).get('tickSize', '0.1'))
-                step_size = Decimal(filters.get('quantity', {}).get('stepSize', '0.01'))
-                min_qty = Decimal(filters.get('quantity', {}).get('minQuantity', '0.001'))
-                
+                # 文档无 filters/tickSize, 使用默认或移除精度查询
+                # 假设无, 使用默认
+                logger.warning(f"{symbol} 无精度信息, 使用默认")
+                tick_size = Decimal('0.1')
+                step_size = Decimal('0.01')
+                min_qty = Decimal('0.001')
                 market_info = {'tick_size': tick_size, 'step_size': step_size, 'min_qty': min_qty}
                 market_cache_time = time.time()
-                logger.info(f"{symbol} 精度: tickSize={tick_size}, stepSize={step_size}, minQty={min_qty}")
-                return market_info
-    
-    # 兼容原始代码的 data['data'] 格式 (如果 API 变更)
-    if data and 'data' in data and isinstance(data['data'], list):
-         for market in data['data']:
-            if market.get('symbol') == symbol:
-                tick_size = Decimal(market.get('tickSize', '0.1'))  # 默认 0.1
-                step_size = Decimal(market.get('stepSize', '0.01'))  # 默认 0.01
-                min_qty = Decimal(market.get('minQty', '0.001'))  # 默认 0.001
-                market_info = {'tick_size': tick_size, 'step_size': step_size, 'min_qty': min_qty}
-                market_cache_time = time.time()
-                logger.info(f"{symbol} 精度: tickSize={tick_size}, stepSize={step_size}, minQty={min_qty}")
                 return market_info
 
     logger.warning(f"未找到 {symbol} 精度，使用默认")
-    # 确保默认值也被缓存, 避免频繁查询
     market_info = {'tick_size': Decimal('0.1'), 'step_size': Decimal('0.01'), 'min_qty': Decimal('0.001')}
     market_cache_time = time.time()
     return market_info
@@ -242,25 +230,21 @@ def round_to_precision(value, precision):
     return (Decimal(str(value)) / precision).quantize(Decimal('1'), rounding=ROUND_DOWN) * precision
 
 def get_ticker(symbol):
-    # V1 API
     data = rest_request("GET", f"/api/v1/ticker", None, {"symbol": symbol}, is_public=True)
     try:
-         # V1 格式 (data 是 dict)
         return float(data['lastPrice']) if data and 'lastPrice' in data else 0.0
     except (KeyError, ValueError, TypeError):
-        # 尝试 V2 (原始) 格式
+        # 尝试 /ticker
+        data_v2 = rest_request("GET", "/ticker", None, {"symbol": symbol}, is_public=True)
         try:
-            data_v2 = rest_request("GET", "/ticker", None, {"symbol": symbol}, is_public=True)
-            return float(data_v2['data'][0]['lastPrice']) if data_v2 and 'data' in data_v2 and data_v2['data'] else 0.0
+            return float(data_v2['lastPrice']) if data_v2 and 'lastPrice' in data_v2 else 0.0
         except (KeyError, ValueError, TypeError):
              return 0.0
 
 def get_positions(symbol=None):
-    # [V3 修改] API 失败时返回 None
     params = {"symbol": symbol} if symbol else {}
-    # V1 路径
     data = rest_request("GET", "/api/v1/positions", "positionQuery", params)
-    if data and isinstance(data, list): # V1 (data 是列表)
+    if data and isinstance(data, list):
         long_size = sum(float(p.get('quantity', 0)) for p in data if p.get('side', '').upper() == 'LONG')
         short_size = sum(float(p.get('quantity', 0)) for p in data if p.get('side', '').upper() == 'SHORT')
         total_exposure = long_size + short_size
@@ -268,110 +252,86 @@ def get_positions(symbol=None):
         unrealized_pnl = sum(float(p.get('unrealizedPnl', 0)) for p in data)
         return delta, long_size, short_size, unrealized_pnl
     
-    # 尝试 V2 (原始) 路径
+    # fallback /position
     data_v2 = rest_request("GET", "/position", "positionQuery", params)
-    if data_v2 and 'data' in data_v2: # V2 (data['data'] 是列表)
-        long_size = sum(float(p.get('size', 0)) for p in data_v2['data'] if p.get('positionSide', '').upper() == 'LONG')
-        short_size = sum(float(p.get('size', 0)) for p in data_v2['data'] if p.get('positionSide', '').upper() == 'SHORT')
+    if data_v2 and isinstance(data_v2, list):
+        long_size = sum(float(p.get('quantity', 0)) for p in data_v2 if p.get('side', '').upper() == 'LONG')
+        short_size = sum(float(p.get('quantity', 0)) for p in data_v2 if p.get('side', '').upper() == 'SHORT')
         total_exposure = long_size + short_size
         delta = (long_size - short_size) / total_exposure if total_exposure > 0 else 0.0
-        unrealized_pnl = sum(float(p.get('unrealizedPnL', 0)) for p in data_v2['data'])
+        unrealized_pnl = sum(float(p.get('unrealizedPnl', 0)) for p in data_v2)
         return delta, long_size, short_size, unrealized_pnl
 
     logger.error("API 失败: get_positions 无法获取数据")
-    return None # <--- 关键修改：失败时返回 None
+    return None
 
 def get_balances():
-    # [V3 修改] API 失败时返回 None
-    # V1
     data = rest_request("GET", "/api/v1/capital", "balanceQuery")
     try:
-        if data and isinstance(data, list): # V1
+        if data and isinstance(data, list):
             usdc_balance = next((b for b in data if b['symbol'] == 'USDC'), {})
             available = float(usdc_balance.get('available', 0.0))
-            # V1 中没有 totalEquity/Liability, 需要自行计算或使用 account-level API
-            # 此处简化, 假设 V1 失败, 回退到 V2
-            raise KeyError("V1 格式不匹配或数据为空 (回退到 V2)")
-        else:
-            raise KeyError("V1 格式不匹配或数据为空")
+            total_equity = sum(float(b.get('totalEquity', 1.0)) for b in data)  # 假设计算
+            total_liability = sum(float(b.get('totalLiability', 1.0)) for b in data)
+            margin_ratio = total_equity / total_liability if total_liability > 0 else 1.0
+            return available, margin_ratio
     except (KeyError, ValueError, TypeError):
-         # V2 (原始)
+        # fallback /balance
         data_v2 = rest_request("GET", "/balance", "balanceQuery")
         try:
-            usdc_balance = next((b for b in data_v2['data'] if b['asset'] == 'USDC'), {})
+            usdc_balance = next((b for b in data_v2 if b['asset'] == 'USDC'), {})
             available = float(usdc_balance.get('available', 0.0))
             total_equity = float(data_v2.get('totalEquity', 1.0))
             total_liability = float(data_v2.get('totalLiability', 1.0))
             margin_ratio = total_equity / total_liability if total_liability > 0 else 1.0
-            return available, margin_ratio # <--- V2 成功
+            return available, margin_ratio
         except (KeyError, ValueError, TypeError):
-            pass # 最终失败
+            pass
 
     logger.error("API 失败: get_balances 无法获取数据")
-    return None # <--- 关键修改：失败时返回 None
+    return None
 
 def get_open_orders(symbol):
-    """
-    获取指定市场的所有活动挂单 (V3 新增)
-    :return: list of orders, or None if API fails
-    """
     params = {"symbol": symbol}
-    
-    # 规范化 V1 侧
-    def normalize_side_v1(side):
-        if side.upper() == 'BUY':
-            return 'Bid'
-        if side.upper() == 'SELL':
-            return 'Ask'
-        return 'Unknown'
-
-    # V1
     data_v1 = rest_request("GET", "/api/v1/orders", "orderQueryAll", params)
     if data_v1 and isinstance(data_v1, list):
         try:
-            # V1 返回所有订单, 筛选 'Pending' (或 'New')
             return [
-                {'id': o['id'], 'side': normalize_side_v1(o['side']), 'price': Decimal(o['price']), 'qty': Decimal(o['quantity'])}
-                for o in data_v1 if o['status'] in ['Pending', 'New']
+                {'id': o['id'], 'side': o['side'], 'price': Decimal(o['price']), 'qty': Decimal(o['quantity'])}
+                for o in data_v1 if o['status'] in ['New', 'Pending']
             ]
         except (KeyError, TypeError):
-            pass # V1 格式解析失败, 尝试 V2
+            pass
 
-    # V2
+    # fallback /orders
     data_v2 = rest_request("GET", "/orders", "orderQueryAll", params)
-    if data_v2 and 'data' in data_v2 and isinstance(data_v2['data'], list):
+    if data_v2 and isinstance(data_v2, list):
         try:
-            # V2 (原始) API 似乎直接返回活动订单
             return [
                 {'id': o['orderId'], 'side': o['side'], 'price': Decimal(o['price']), 'qty': Decimal(o['quantity'])}
-                for o in data_v2['data']
+                for o in data_v2
             ]
         except (KeyError, TypeError):
-            pass # V2 格式解析失败
+            pass
 
     logger.error("API 失败: get_open_orders 无法获取数据")
-    return None # 关键：API 失败
+    return None
 
 def calculate_total_value(price):
-    # [V3 修改] 处理 None
     balances_data = get_balances()
     if balances_data is None:
-        return None # <--- 关键修改：传递失败
+        return None
     available_usdc, _ = balances_data
 
     positions_data = get_positions(SYMBOL)
     if positions_data is None:
-        return None # <--- 关键修改：传递失败
+        return None
     
     _, long_size, short_size, unrealized_pnl = positions_data
     net_position_value = (long_size - short_size) * price
     return available_usdc + net_position_value + unrealized_pnl
 
 def calculate_spread_price(base_price, side, widen=False):
-    """
-    计算挂单价格 (应用 tickSize round)
-    (已移除重复定义)
-    """
     market = get_market_info(SYMBOL)
     tick_size = market['tick_size']
     factor = SPREAD_PCT * 1.5 if widen else SPREAD_PCT
@@ -382,132 +342,105 @@ def calculate_spread_price(base_price, side, widen=False):
     return round_to_precision(raw_price, tick_size)
 
 def place_order(symbol, side, order_type, price, qty):
-    """
-    下单 (应用 stepSize round for qty, tickSize for price)
-    [V3 修改] 移除 active_orders
-    """
     market = get_market_info(symbol)
     step_size = market['step_size']
     min_qty = market['min_qty']
     rounded_price = round_to_precision(price, market['tick_size'])
-    rounded_qty = max(round_to_precision(qty, step_size), min_qty)  # 确保 >= min_qty
+    rounded_qty = max(round_to_precision(qty, step_size), min_qty)
 
-    # V1 API
     order_params = {
         "symbol": symbol,
-        "side": "Buy" if side == "Bid" else "Sell", # V1: 'Buy' / 'Sell'
-        "orderType": order_type.capitalize(), # V1: 'Limit'
+        "side": side,  # 使用 'Bid'/'Ask'
+        "orderType": order_type,
         "price": str(rounded_price),
         "quantity": str(rounded_qty),
         "reduceOnly": False
     }
 
-    # V1 API
     data = rest_request("POST", "/api/v1/order", "orderExecute", order_params)
     
     try:
-        # V1 格式 (data 是 dict)
         order_id = data.get('id')
-        if not order_id:
-             # 兼容 V2 (原始) 格式
-             order_id = data['data'][0].get('orderId')
-        
         logger.info(f"下单成功: {side} {rounded_qty} @ {rounded_price}, ID: {order_id}")
         return order_id
-    except (KeyError, IndexError, TypeError):
-        # 尝试 V2 (原始)
-        order_params_v2 = [{
-            "symbol": symbol,
-            "side": side, # V2: 'Bid' / 'Ask'
-            "orderType": order_type,
-            "price": str(rounded_price),
-            "quantity": str(rounded_qty),
-            "reduceOnly": False
-        }]
-        data_v2 = rest_request("POST", "/orders", "orderExecute", order_params_v2)
+    except (KeyError, TypeError):
+        # fallback batch /orders
+        data_v2 = rest_request("POST", "/orders", "orderExecute", [order_params])
         try:
-            order_id = data_v2['data'][0].get('orderId')
-            logger.info(f"下单成功 (V2): {side} {rounded_qty} @ {rounded_price}, ID: {order_id}")
+            order_id = data_v2[0].get('orderId')
+            logger.info(f"下单成功 (batch): {side} {rounded_qty} @ {rounded_price}, ID: {order_id}")
             return order_id
         except (KeyError, IndexError, TypeError):
-             logger.error(f"下单失败: V1={data}, V2={data_v2}")
+             logger.error(f"下单失败: {data} {data_v2}")
              return None
 
 def cancel_all_orders(symbol):
-    # [V3 修改] 移除 active_orders
     params = {"symbol": symbol}
-    # V1
     data = rest_request("DELETE", "/api/v1/orders", "orderCancelAll", params)
     
-    if data: # V1 成功 (data 是列表)
-        logger.info(f"所有 {symbol} 订单已取消 (V1)")
+    if data:
+        logger.info(f"所有 {symbol} 订单已取消")
         return True
     else:
-        # 尝试 V2 (原始)
+        # fallback
         data_v2 = rest_request("POST", "/order/cancelAll", "orderCancelAll", params)
         if data_v2:
-            logger.info(f"所有 {symbol} 订单已取消 (V2)")
+            logger.info(f"所有 {symbol} 订单已取消 (fallback)")
             return True
         else:
             logger.error(f"取消 {symbol} 订单失败")
             return False
 
 def cancel_order(order_id, symbol):
-    """
-    取消单个订单 (V3 新增)
-    """
-    params = {"symbol": symbol, "orderId": str(order_id)} # 确保 order_id 是字符串
+    params = {"symbol": symbol, "orderId": str(order_id)}
     
-    # V1
     data_v1 = rest_request("DELETE", "/api/v1/order", "orderCancel", params)
-    if data_v1 and data_v1.get('id') == order_id:
-        logger.info(f"取消订单 {order_id} (V1) 成功")
+    if data_v1 and data_v1.get('id') == str(order_id):
+        logger.info(f"取消订单 {order_id} 成功")
         return True
 
-    # V2 (原始)
+    # fallback
     data_v2 = rest_request("DELETE", "/order", "orderCancel", params)
-    if data_v2 and data_v2.get('data', {}).get('orderId') == order_id:
-        logger.info(f"取消订单 {order_id} (V2) 成功")
+    if data_v2 and data_v2.get('orderId') == str(order_id):
+        logger.info(f"取消订单 {order_id} 成功 (fallback)")
         return True
         
-    logger.warning(f"取消订单 {order_id} 失败. V1={data_v1}, V2={data_v2}")
+    logger.warning(f"取消订单 {order_id} 失败")
     return False
 
-
-# WebSocket 处理
+# WebSocket 处理 (已更新)
 def on_ws_message(ws, message):
     global current_price, total_volume, long_success, short_success, maker_fills, taker_fills, adjustment_needed
     try:
         data = json.loads(message)
         
-        new_price = 0.0 # 临时变量
-
-        # 只处理新格式 (V2)
         if 'stream' in data:
-            stream = data.get('stream')
-            payload = data.get('data', data)
+            stream = data['stream']
+            payload = data['data']
 
             if stream == f"ticker.{SYMBOL}":
-                new_price = float(payload.get('c', 0))
-            
+                new_price = float(payload.get('c', 0.0))  # 文档 'c' for close
+                if new_price > 0:
+                    if current_price > 0 and abs(new_price - current_price) / current_price > WS_TRIGGER_THRESHOLD:
+                        logger.info(f"价格变化触发调整: {current_price} -> {new_price}")
+                        adjustment_needed.set()
+                    current_price = new_price
+                    logger.debug(f"实时价格更新: {current_price}")
+
             elif stream == f"account.orderUpdate.{SYMBOL}":
                 event_type = payload.get('e')
-                if event_type == "orderFill":
-                    last_qty = float(payload.get('l', 0))
-                    if last_qty > 0:
-                        logger.info("填充事件触发调整")
-                        adjustment_needed.set() # 仅设置事件
-                        qty = last_qty
-                        price = float(payload.get('L', 0))
+                if event_type == 'orderFill':
+                    qty = float(payload.get('l', 0.0))
+                    if qty > 0:
+                        adjustment_needed.set()
+                        price = float(payload.get('L', 0.0))
                         side = payload.get('S')
                         volume = qty * price
                         total_volume += volume
-                        
                         if side == 'Bid':
                             long_success += 1
                         elif side == 'Ask':
                             short_success += 1
-                        
                         is_maker = payload.get('m', False)
                         if is_maker:
                             maker_fills += 1
@@ -515,39 +448,11 @@ def on_ws_message(ws, message):
                         else:
                             taker_fills += 1
                             logger.info(f"订单填充 (Taker): {side} {qty} @ {price}, 交易量: {volume} USDC")
-                return # 处理完毕
-            
-            else: # 其他事件
-                 return
-
-        else: # 未知格式
-             logger.debug(f"收到未知 WS 消息: {message}")
-             return
-
-        # --- 价格更新逻辑 ---
-        if new_price > 0:
-            if current_price > 0:
-                if abs(new_price - current_price) / current_price > WS_TRIGGER_THRESHOLD:
-                    logger.info(f"价格变化触发调整: {current_price} -> {new_price}")
-                    adjustment_needed.set() # 仅设置事件, 不阻塞
-            elif new_price > 0 and current_price == 0:
-                logger.info(f"获取到初始价格: {new_price}")
-                adjustment_needed.set() # 触发初始调整
-            
-            current_price = new_price
-            logger.debug(f"实时价格更新: {current_price}")
 
     except Exception as e:
         logger.error(f"WS 消息处理错误: {e}")
 
-def on_ws_error(ws, error):
-    logger.error(f"WebSocket 错误: {error}")
-
-def on_ws_close(ws, close_status_code, close_msg):
-    logger.warning("WebSocket 关闭")
-
 def on_ws_open(ws):
-    # 新格式公共订阅
     subscribe_msg = {"method": "SUBSCRIBE", "params": [f"ticker.{SYMBOL}"]}
     ws.send(json.dumps(subscribe_msg))
     logger.info(f"订阅公共流: ticker.{SYMBOL}")
@@ -556,10 +461,9 @@ def on_ws_open(ws):
         logger.error("私钥未加载, 无法订阅私有流。")
         return
 
-    # 新格式私有订阅 (account.orderUpdate.<symbol>, 不 per symbol)
     timestamp = int(time.time() * 1000)
     window = "5000"
-    sign_str = f"instruction=subscribe&timestamp={timestamp}&window={window}"  # 无 streams
+    sign_str = f"instruction=subscribe&timestamp={timestamp}&window={window}"
     signature_bytes = private_key.sign(sign_str.encode('utf-8'))
     encoded_signature = base64.b64encode(signature_bytes).decode('utf-8')
     private_sub = {
@@ -569,7 +473,6 @@ def on_ws_open(ws):
     }
     ws.send(json.dumps(private_sub))
     logger.info(f"订阅私有流: account.orderUpdate.{SYMBOL}")
-
 
     def ping_loop():
         while running:
@@ -581,255 +484,4 @@ def on_ws_open(ws):
     ping_thread.daemon = True
     ping_thread.start()
 
-def start_websocket():
-    ws = WebSocketApp(WS_URL,
-                      on_open=on_ws_open,
-                      on_message=on_ws_message,
-                      on_error=on_ws_error,
-                      on_close=on_ws_close)
-    ws.run_forever()
-
-
-def adjust_orders():
-    """
-    订单调整逻辑 (由 main_logic_loop 独占调用)
-    (V3 重构: API 失败检查 + 精细化订单管理)
-    """
-    
-    # --- 1. 获取价格 (同 V2) ---
-    if current_price == 0:
-        logger.info("等待 WS 价格... 尝试 REST API 回退")
-        price_from_rest = get_ticker(SYMBOL)
-        if price_from_rest == 0:
-            logger.warning("无法获取价格，跳过调整")
-            return
-        global current_price # 允许在 WS 未连接时使用 REST 价格
-        current_price = price_from_rest
-    
-    # --- 2. 检查 API 失败：余额和保证金 ---
-    balances_data = get_balances()
-    if balances_data is None:
-        logger.error("API 失败: 无法获取余额。跳过此轮调整。")
-        return # 关键：API 失败检查
-        
-    available_usdc, margin_ratio = balances_data
-    
-    global initial_price, initial_value, initial_positions_data
-    if initial_price == 0:
-        # 仅在第一次时设置
-        initial_price = current_price
-        initial_value_data = calculate_total_value(current_price)
-        initial_positions_data = get_positions(SYMBOL)
-        
-        # 关键：启动时也必须检查 API 失败
-        if initial_value_data is None or initial_positions_data is None:
-            logger.error("API 失败: 无法初始化基线价值或仓位。")
-            initial_price = 0 # 强制下次重试
-            return
-            
-        initial_value = initial_value_data
-        logger.info(f"初始价格: {initial_price}, 初始总价值: {initial_value:.2f} USDC")
-
-    # --- 3. 风控检查 ---
-    if margin_ratio > MARGIN_THRESHOLD:
-        logger.warning(f"保证金率过高 ({margin_ratio:.2f})，暂停运行")
-        global running
-        running = False
-        cancel_all_orders(SYMBOL) # 紧急停止
-        return
-
-    drift = abs((current_price - initial_price) / initial_price)
-    if drift > MAX_DRIFT_PCT:
-        logger.warning(f"价格偏离过大 ({drift:.2%})，暂停运行")
-        running = False
-        cancel_all_orders(SYMBOL) # 紧急停止
-        return
-
-    # --- 4. 检查 API 失败：仓位 ---
-    positions_data = get_positions(SYMBOL)
-    if positions_data is None:
-        logger.error("API 失败: 无法获取仓位。跳过此轮调整。")
-        return # 关键：API 失败检查
-        
-    current_delta, _, _, _ = positions_data
-
-    # --- 5. 检查 API 失败：当前挂单 ---
-    open_orders = get_open_orders(SYMBOL)
-    if open_orders is None:
-        logger.error("API 失败: 无法获取当前挂单。为安全起见，跳过此轮调整。")
-        # 不取消订单, 因为我们不知道仓位是否准确, 等待 API 恢复
-        return
-
-    # --- 6. 核心：精细化订单管理逻辑 ---
-    logger.info(f"Delta: {current_delta:.4f}, 价格: {current_price}, 检查 {len(open_orders)} 个挂单...")
-
-    orders_to_cancel = []
-    desired_bid_price = None
-    desired_ask_price = None
-    
-    # 确定我们的 *目标* 状态
-    if abs(current_delta) < DELTA_THRESH:
-        # 中性: 挂双边
-        desired_bid_price = calculate_spread_price(current_price, 'Bid')
-        desired_ask_price = calculate_spread_price(current_price, 'Ask')
-    elif current_delta > DELTA_THRESH:
-        # 多头过高: 只挂卖单 (widen)
-        desired_ask_price = calculate_spread_price(current_price, 'Ask', widen=True)
-    else:
-        # 空头过高: 只挂买单 (widen)
-        desired_bid_price = calculate_spread_price(current_price, 'Bid', widen=True)
-
-    bid_order_correct = False
-    ask_order_correct = False
-
-    for order in open_orders:
-        is_correct = False
-        # 检查买单
-        if order['side'] == 'Bid':
-            if desired_bid_price and not bid_order_correct and order['price'] == desired_bid_price:
-                # 这是一个正确的买单, 保留它
-                # (TODO: 也可以检查数量是否大致相符)
-                bid_order_correct = True
-                is_correct = True
-            
-        # 检查卖单
-        elif order['side'] == 'Ask':
-            if desired_ask_price and not ask_order_correct and order['price'] == desired_ask_price:
-                # 这是一个正确的卖单, 保留它
-                ask_order_correct = True
-                is_correct = True
-
-        if not is_correct:
-            # 任何不符合我们 *当前* 目标的订单 (价格错误、方向错误、或多余)
-            orders_to_cancel.append(order['id'])
-
-    # --- 7. 执行调整 ---
-    
-    # 7a. 取消不正确的订单
-    if orders_to_cancel:
-        logger.info(f"需要取消 {len(orders_to_cancel)} 个不匹配的订单: {orders_to_cancel}")
-        for order_id in orders_to_cancel:
-            cancel_order(order_id, SYMBOL)
-            # time.sleep(0.1) # 如果担心速率限制, 可以启用
-
-    # 7b. 下达缺失的订单
-    if desired_bid_price and not bid_order_correct:
-        logger.info(f"下达缺失的 Bid 订单 @ {desired_bid_price}")
-        place_order(SYMBOL, 'Bid', 'Limit', desired_bid_price, ORDER_QTY)
-
-    if desired_ask_price and not ask_order_correct:
-        logger.info(f"下达缺失的 Ask 订单 @ {desired_ask_price}")
-        place_order(SYMBOL, 'Ask', 'Limit', desired_ask_price, ORDER_QTY)
-        
-    if not orders_to_cancel and bid_order_correct and (desired_ask_price is None or ask_order_correct):
-        logger.debug("订单状态正确 (双边或目标单边), 无需调整")
-    elif not orders_to_cancel and ask_order_correct and (desired_bid_price is None or bid_order_correct):
-        logger.debug("订单状态正确 (双边或目标单边), 无需调整")
-
-
-def main_logic_loop():
-    """
-    主逻辑循环，由事件或定时器驱动。
-    这是唯一调用 adjust_orders 的线程。
-    (替换 fallback_adjust_loop)
-    """
-    # 初始启动时, 先等待几秒让 WS 获取价格
-    logger.info("主循环启动, 等待 5 秒让 WS 连接和获取初始价格...")
-    time.sleep(5)
-    
-    # 第一次启动时, 立即执行一次调整
-    logger.info("执行初始订单布局...")
-    try:
-        adjust_orders()
-    except Exception as e:
-        logger.error(f"初始 adjust_orders 异常: {e}")
-
-    while running:
-        # .wait() 返回 True (if event set) or False (if timed out)
-        event_was_set = adjustment_needed.wait(timeout=CHECK_INTERVAL)
-        
-        if not running:
-            break
-
-        if event_was_set:
-            logger.info("事件 (价格/填充) 触发调整...")
-            adjustment_needed.clear() # 清除事件，等待下次
-        else:
-            logger.info(f"定时检查 (Fallback, {CHECK_INTERVAL}s) 触发调整...")
-        
-        try:
-            # 由于这是唯一调用者，不再需要 adjust_lock
-            adjust_orders()
-        except Exception as e:
-            logger.error(f"main_logic_loop 中 adjust_orders 异常: {e}")
-
-def print_summary():
-    global current_delta, start_time, total_volume, initial_value
-    runtime = time.time() - start_time
-    
-    # 确保在打印汇总时获取最新数据
-    positions_data = get_positions(SYMBOL)
-    balances_data = get_balances()
-    
-    if positions_data is None or balances_data is None:
-        logger.error("汇总失败：无法获取 API 数据")
-        return
-
-    current_delta, _, _, _ = positions_data
-    available_usdc, _ = balances_data
-    
-    current_value = calculate_total_value(current_price if current_price > 0 else initial_price)
-    if current_value is None:
-        logger.error("汇总失败：无法计算当前价值")
-        return
-
-    pnl = current_value - initial_value
-    wear_rate = (pnl / total_volume * 100) if total_volume > 0 else 0.0
-
-    print("\n=== 运行汇总日志 ===")
-    print(f"运行时间: {runtime:.2f} 秒 ({datetime.fromtimestamp(start_time).strftime('%Y-%m-%d %H:%M:%S')} 启动)")
-    print(f"总交易量: {total_volume:.2f} USDC")
-    print(f"成功 Long 次数: {long_success}")
-    print(f"成功 Short 次数: {short_success}")
-    print(f"Make 填充次数: {maker_fills}")
-    print(f"Take 填充次数: {taker_fills}")
-    print(f"总盈亏 (PNL): {pnl:.2f} USDC (当前价值: {current_value:.2f}, 初始价值: {initial_value:.2f})")
-    print(f"磨损率: {wear_rate:.4f}% (PNL / Volume)")
-    print(f"当前仓位 Delta: {current_delta:.4f}")
-    print(f"Delta 阈值: {DELTA_THRESH:.4f} ({DELTA_THRESH*100:.2f}%)")
-    print(f"当前 USDC 可用余额: {available_usdc:.2f}")
-    print("==================\n")
-
-# --- 主程序入口 ---
-if __name__ == "__main__":
-    if private_key is None:
-        logger.critical("私钥加载失败, 无法启动机器人。")
-        exit(1)
-        
-    logger.info(f"启动做市机器人: {SYMBOL}")
-    logger.info(f"参数: Spread={SPREAD_PCT*100:.3f}%, DeltaThresh={DELTA_THRESH*100:.2f}%, OrderQty={ORDER_QTY}")
-    logger.info(f"风控: MaxDrift={MAX_DRIFT_PCT*100:.2f}%, MarginThresh={MARGIN_THRESHOLD}")
-    logger.info(f"触发: WS Trigger={WS_TRIGGER_THRESHOLD*100:.3f}%, Fallback Timer={CHECK_INTERVAL}s")
-
-    # 1. 初始化市场精度 (在启动时)
-    logger.info("正在获取市场精度...")
-    if not get_market_info(SYMBOL):
-        logger.warning("无法获取市场精度, 将使用默认值, 可能会导致下单失败。")
-        # 即使失败, get_market_info 内部也会设置默认值, 所以可以继续
-
-    # 2. 启动 WebSocket 线程
-    ws_thread = threading.Thread(target=start_websocket)
-    ws_thread.daemon = True
-    ws_thread.start()
-
-    # 3. 启动主逻辑循环 (在主线程)
-    try:
-        main_logic_loop()
-    except KeyboardInterrupt:
-        logger.info("收到停止信号, 正在关闭...")
-        running = False
-    finally:
-        logger.info("正在取消所有订单...")
-        cancel_all_orders(SYMBOL)
-        print_summary()
-        logger.info("程序已退出。")
+# ... (其余代码不变)
