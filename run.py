@@ -263,5 +263,35 @@ class MarketMaker:
 
 # === 启动入口 ===
 if __name__ == "__main__":
-    mm = MarketMaker("BTC_USDC_PERP")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Backpack 做市机器人")
+    parser.add_argument("--symbol", type=str, default="BTC_USDC_PERP", help="交易对符号")
+    parser.add_argument("--spread", type=float, default=0.03, help="挂单价差百分比")
+    parser.add_argument("--delta", type=float, default=3.0, help="价格触发调整的变化百分比")
+    parser.add_argument("--qty", type=float, default=0.0003, help="每笔下单数量")
+    parser.add_argument("--maxdrift", type=float, default=2.0, help="允许的最大价格漂移百分比")
+    parser.add_argument("--margin", type=float, default=1.5, help="最低保证金比率")
+    parser.add_argument("--ws-trigger", type=float, default=0.015, help="WS 价格变化触发阈值百分比")
+    parser.add_argument("--check-interval", type=int, default=60, help="周期性兜底检查间隔（秒）")
+
+
+    args = parser.parse_args()
+
+    logger.info(
+        f"命令行参数: symbol={args.symbol}, spread={args.spread}%, "
+        f"delta={args.delta}%, qty={args.qty}, maxdrift={args.maxdrift}%, margin={args.margin}"
+    )
+
+    mm = MarketMaker(
+        symbol=args.symbol,
+    spread=args.spread,
+    delta_thresh=args.delta,
+    order_qty=args.qty,
+    max_drift=args.maxdrift,
+    margin_thresh=args.margin,
+    ws_trigger=args.ws_trigger,
+    check_interval=args.check_interval,
+    )
     mm.run()
+
