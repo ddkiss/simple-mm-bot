@@ -93,14 +93,15 @@ class BackpackAuthenticator:
         import json
         timestamp = str(int(time.time() * 1000))
         params = params or {}
-        # Build sorted param string
+
+        # 构建签名字符串
         param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
         sign_string = f"instruction={instruction}"
         if param_str:
             sign_string += f"&{param_str}"
         sign_string += f"&timestamp={timestamp}&window={window}"
 
-        # Sign
+        # 执行签名
         signature_bytes = self.signing_key.sign(sign_string.encode()).signature
         signature_b64 = base64.b64encode(signature_bytes).decode()
 
@@ -112,7 +113,18 @@ class BackpackAuthenticator:
             "Content-Type": "application/json"
         }
 
+        # Debug 输出
         logging.debug("
+===== Backpack Signature Debug =====")
+        logging.debug(f"Instruction: {instruction}")
+        logging.debug(f"Params: {json.dumps(params, indent=2)}")
+        logging.debug(f"Sign String: {sign_string}")
+        logging.debug(f"Signature (Base64): {signature_b64}")
+        logging.debug(f"Headers: {json.dumps(headers, indent=2)}")
+        logging.debug("====================================
+")
+
+        return headers
 ===== Backpack Signature Debug =====")
         logging.debug(f"Instruction: {instruction}")
         logging.debug(f"Params: {json.dumps(params, indent=2)}")
