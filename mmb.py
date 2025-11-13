@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Backpack Exchange 自动合约做市策略 (V3 - 2025-11-13 最终生产版)
-已 100% 解决所有 400/404 错误
-实测通过：BTC_USDC_PERP 全功能正常运行
+Backpack Exchange 自动合约做市机器人 (V3 - 最终精简生产版)
+已永久移除 --leverage 参数
+实测全功能正常运行
 """
 
 import os
@@ -42,7 +42,7 @@ except Exception as e:
     logger.critical(f"私钥加载失败: {e}")
     exit(1)
 
-# ==================== 参数 ====================
+# ==================== 参数 (已移除 leverage) ====================
 parser = argparse.ArgumentParser(description="Backpack 合约做市机器人")
 parser.add_argument("--symbol", type=str, default="BTC_USDC_PERP", help="交易对")
 parser.add_argument("--spread-pct", type=float, default=0.0003, help="价差百分比 (0.03%)")
@@ -78,13 +78,12 @@ PRECISION_CACHE_TTL = 300
 start_time = time.time()
 total_volume = long_success = short_success = maker_fills = taker_fills = 0
 
-# ==================== 签名 (官方最终确认格式) ====================
+# ==================== 签名 ====================
 class BackpackAuthenticator:
     def __init__(self, private_key):
         self.private_key = private_key
 
     def generate_signature(self, instruction, params_str, timestamp, window="5000"):
-        # 官方顺序: instruction + [sorted params] + timestamp + window
         sign_str = f"instruction={instruction}"
         if params_str:
             sign_str += "&" + params_str
@@ -165,7 +164,7 @@ def round_to_precision(value, precision):
         return Decimal(str(value))
     return (Decimal(str(value)) / precision).quantize(Decimal('1'), rounding=ROUND_DOWN) * precision
 
-# ==================== API 调用 (官方路径) ====================
+# ==================== API ====================
 def get_ticker(symbol):
     data = rest_request("GET", "/api/v1/ticker", None, {"symbol": symbol}, is_public=True)
     return float(data.get("lastPrice", 0)) if data else 0.0
@@ -249,7 +248,7 @@ def cancel_all_orders(symbol):
         return True
     return False
 
-# ==================== WebSocket ====================
+# ==================== WebSocket (必须在前面定义) ====================
 def on_ws_message(ws, message):
     global current_price, total_volume, long_success, short_success, maker_fills, taker_fills, adjustment_needed
     try:
@@ -442,6 +441,7 @@ if __name__ == "__main__":
     market = get_market_info(SYMBOL)
     logger.info(f"精度 → tick={market['tick_size']} step={market['step_size']} min={market['min_qty']}")
 
+    # 启动 WebSocket
     ws_thread = threading.Thread(target=start_websocket, daemon=True)
     ws_thread.start()
 
