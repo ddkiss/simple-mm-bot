@@ -10,6 +10,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+from dotenv import load_dotenv
+load_dotenv()
+
+
 # === 初始化日志输出 ===
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
